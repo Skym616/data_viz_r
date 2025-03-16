@@ -1,0 +1,764 @@
+---
+title: "Tableau de Bord de Segmentation Clients E-commerce"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(flexdashboard)
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(plotly)
+library(DT)
+library(readxl)
+library(lubridate)
+library(viridis)
+library(scales)
+
+# Palette fixe pour les segments clients - respecte l'ordre des segments
+segment_colors <- c("Clients Occasionnels" = "#CCBB44", 
+                    "Clients Réguliers" = "#66CCEE", 
+                    "Clients Prenium" = "#4477AA", 
+                    "Clients Inactifs" = "#EE6677")
+```
+
+```{r load-data, include=FALSE}
+# Charger les données
+online_retail <- readxl::read_excel("Online_Retail.xlsx")
+
+# Nettoyage des données
+online_retail_clean <- online_retail %>%
+  filter(!is.na(CustomerID)) %>%
+  filter(Quantity > 0, UnitPrice > 0)
+
+# Convertir la date et ajouter le prix total
+online_retail_clean$InvoiceDate <- as.Date(online_retail_clean$InvoiceDate)
+online_retail_clean$TotalPrice <- online_retail_clean$Quantity * online_retail_clean$UnitPrice
+
+# Définir la date de référence (un jour après la dernière date dans les données)
+max_date <- max(online_retail_clean$InvoiceDate) + 1
+
+# Calculer les métriques RFM par client
+rfm_data <- online_retail_clean %>%
+  group_by(CustomerID) %>%
+  summarise(
+    Recency = as.numeric(max_date - max(InvoiceDate)),
+    Frequency = n_distinct(InvoiceNo),
+    Monetary = sum(TotalPrice)
+  )
+
+# Normalisation des variables RFM pour le clustering
+rfm_normalized <- rfm_data %>%
+  mutate(
+    RecencyNorm = scale(Recency),
+    FrequencyNorm = scale(Frequency),
+    MonetaryNorm = scale(Monetary)
+  )
+
+# Préparation des données pour le clustering
+rfm_for_clustering <- rfm_normalized %>%
+  select(RecencyNorm, FrequencyNorm, MonetaryNorm)
+
+# Appliquer K-means avec k=4
+set.seed(123)
+k <- 4
+kmeans_result <- kmeans(rfm_for_clustering, centers = k, nstart = 25)
+
+# Ajouter les clusters aux données RFM
+rfm_with_clusters <- rfm_normalized %>%
+  mutate(Cluster = as.factor(kmeans_result$cluster))
+
+# Résumé des clusters
+cluster_summary <- rfm_with_clusters %>%
+  group_by(Cluster) %>%
+  summarise(
+    Nombre_Clients = n(),
+    Recency_Moyenne = round(mean(Recency), 1),
+    Frequency_Moyenne = round(mean(Frequency), 1),
+    Monetary_Moyenne = round(mean(Monetary), 2)
+  ) %>%
+  arrange(desc(Monetary_Moyenne))
+
+# Créer des étiquettes plus descriptives pour les clusters
+cluster_labels <- c(
+  "1" = "Clients Occasionnels",
+  "2" = "Clients Réguliers",
+  "3" = "Clients Prenium",
+  "4" = "Clients Inactifs"
+)
+
+# Ajouter les étiquettes au dataframe
+rfm_with_clusters$Segment <- factor(rfm_with_clusters$Cluster, 
+                                   levels = names(cluster_labels),
+                                   labels = cluster_labels)
+
+# Créer une version avec les étiquettes pour les statistiques
+cluster_summary$Segment <- cluster_labels[as.character(cluster_summary$Cluster)]
+
+# Préparation des données pour les analyses de produits et ventes
+# Extraire le pays, la date, l'heure etc.
+online_retail_clean$Country <- factor(online_retail_clean$Country)
+online_retail_clean$YearMonth <- format(online_retail_clean$InvoiceDate, "%Y-%m")
+online_retail_clean$Month <- format(online_retail_clean$InvoiceDate, "%m")
+online_retail_clean$Year <- format(online_retail_clean$InvoiceDate, "%Y")
+online_retail_clean$WeekDay <- weekdays(online_retail_clean$InvoiceDate)
+online_retail_clean$Hour <- format(as.POSIXct(online_retail_clean$InvoiceDate), "%H")
+
+# Convertir les mois en facteur ordonné
+online_retail_clean$Month <- factor(online_retail_clean$Month, 
+                                   levels = c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"),
+                                   labels = c("Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sept", "Oct", "Nov", "Déc"))
+
+# Convertir les jours de la semaine en facteur ordonné
+online_retail_clean$WeekDay <- factor(online_retail_clean$WeekDay,
+                                     levels = c("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"))
+
+# Top 10 des pays avec les ventes les plus élevées
+top_countries <- online_retail_clean %>%
+  group_by(Country) %>%
+  summarise(TotalSales = sum(TotalPrice)) %>%
+  arrange(desc(TotalSales)) %>%
+  head(10)
+
+# Articles les plus achetés (fréquence d'achat)
+top_items_frequency <- online_retail_clean %>%
+  group_by(StockCode, Description) %>%
+  summarise(PurchaseCount = n_distinct(InvoiceNo)) %>%
+  arrange(desc(PurchaseCount)) %>%
+  head(10)
+
+# Top 20 des articles les plus achetés (fréquence d'achat)
+top_items_frequency_20 <- online_retail_clean %>%
+  group_by(StockCode, Description) %>%
+  summarise(PurchaseCount = n_distinct(InvoiceNo)) %>%
+  arrange(desc(PurchaseCount)) %>%
+  head(20)
+
+# Top 10 des articles les plus vendus (quantité)
+top_items_quantity_10 <- online_retail_clean %>%
+  group_by(StockCode, Description) %>%
+  summarise(TotalQuantity = sum(Quantity)) %>%
+  arrange(desc(TotalQuantity)) %>%
+  head(10)
+
+# Top 20 des articles les plus vendus (quantité)
+top_items_quantity <- online_retail_clean %>%
+  group_by(StockCode, Description) %>%
+  summarise(TotalQuantity = sum(Quantity)) %>%
+  arrange(desc(TotalQuantity)) %>%
+  head(20)
+
+# Top 10 des articles les plus vendus (en valeur)
+top_items_value <- online_retail_clean %>%
+  group_by(StockCode, Description) %>%
+  summarise(TotalValue = sum(TotalPrice)) %>%
+  arrange(desc(TotalValue)) %>%
+  head(10)
+
+# Ventes par mois
+sales_by_month <- online_retail_clean %>%
+  group_by(Year, Month) %>%
+  summarise(TotalSales = sum(TotalPrice)) %>%
+  arrange(Year, Month)
+
+# Ventes par heure
+sales_by_hour <- online_retail_clean %>%
+  group_by(Hour) %>%
+  summarise(TotalSales = sum(TotalPrice),
+            TransactionCount = n_distinct(InvoiceNo)) %>%
+  arrange(Hour)
+
+# Meilleur produit par pays
+best_product_by_country <- online_retail_clean %>%
+  group_by(Country, StockCode, Description) %>%
+  summarise(TotalSales = sum(TotalPrice)) %>%
+  arrange(Country, desc(TotalSales)) %>%
+  group_by(Country) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(desc(TotalSales))
+
+# Évolution des ventes au cours du temps
+sales_over_time <- online_retail_clean %>%
+  group_by(InvoiceDate) %>%
+  summarise(TotalSales = sum(TotalPrice)) %>%
+  arrange(InvoiceDate)
+
+# Calcul du panier moyen
+basket_data <- online_retail_clean %>%
+  group_by(InvoiceNo) %>%
+  summarise(
+    BasketValue = sum(TotalPrice),
+    ItemCount = n(),
+    DistinctItems = n_distinct(StockCode)
+  )
+
+# Nombre total de produits distincts
+total_distinct_products <- n_distinct(online_retail_clean$StockCode)
+
+# Panier moyen
+average_basket_value <- mean(basket_data$BasketValue)
+average_items_per_basket <- mean(basket_data$ItemCount)
+average_distinct_items_per_basket <- mean(basket_data$DistinctItems)
+
+# Analyse des heures de vente (heatmap)
+hourly_sales <- online_retail_clean %>%
+  mutate(Hour = as.numeric(Hour)) %>%
+  group_by(WeekDay, Hour) %>%
+  summarise(
+    TransactionCount = n_distinct(InvoiceNo),
+    TotalSales = sum(TotalPrice)
+  )
+
+# Créer une grille complète pour les jours/heures
+weekdays_seq <- levels(online_retail_clean$WeekDay)
+hours_seq <- 0:23
+
+hourly_grid <- expand.grid(
+  WeekDay = factor(weekdays_seq, levels = weekdays_seq),
+  Hour = hours_seq
+) %>%
+  left_join(hourly_sales, by = c("WeekDay", "Hour")) %>%
+  mutate(
+    TransactionCount = ifelse(is.na(TransactionCount), 0, TransactionCount),
+    TotalSales = ifelse(is.na(TotalSales), 0, TotalSales)
+  )
+
+# Convertir en matrices pour les heatmaps
+transaction_matrix <- matrix(
+  hourly_grid$TransactionCount, 
+  nrow = length(weekdays_seq), 
+  ncol = length(hours_seq),
+  byrow = FALSE
+)
+rownames(transaction_matrix) <- weekdays_seq
+colnames(transaction_matrix) <- hours_seq
+
+sales_matrix <- matrix(
+  hourly_grid$TotalSales, 
+  nrow = length(weekdays_seq), 
+  ncol = length(hours_seq),
+  byrow = FALSE
+)
+rownames(sales_matrix) <- weekdays_seq
+colnames(sales_matrix) <- hours_seq
+```
+
+Vue d'ensemble {.tabset .tabset-fade data-icon="fa-tachometer-alt"}
+===================================== 
+
+Row {data-height=150}
+-------------------------------------
+
+### Nombre total de clients
+```{r}
+valueBox(
+  value = format(nrow(rfm_data), big.mark = " "),
+  caption = "Clients Analysés",
+  icon = "fa-users",
+  color = "primary"
+)
+```
+
+### Montant total des ventes
+```{r}
+valueBox(
+  value = paste0(format(round(sum(rfm_data$Monetary)/1000000, 1), big.mark = " "), " M €"),
+  caption = "Chiffre d'Affaires Total",
+  icon = "fa-euro-sign",
+  color = "success"
+)
+```
+
+### Nombre de transactions
+```{r}
+valueBox(
+  value = format(n_distinct(online_retail_clean$InvoiceNo), big.mark = " "),
+  caption = "Nombre Total de Transactions",
+  icon = "fa-shopping-cart",
+  color = "info"
+)
+```
+
+### Nombre de segments clients
+```{r}
+valueBox(
+  value = k,
+  caption = "Segments de Clients Identifiés",
+  icon = "fa-layer-group",
+  color = "warning"
+)
+```
+
+Row {data-height=150}
+-------------------------------------
+
+### Panier moyen
+```{r}
+valueBox(
+  value = paste0(format(round(average_basket_value, 2), big.mark = " ", decimal.mark = ","), " €"),
+  caption = "Valeur moyenne du panier",
+  icon = "fa-shopping-basket",
+  color = "success"
+)
+```
+
+### Nombre moyen d'articles par panier
+```{r}
+valueBox(
+  value = format(round(average_items_per_basket, 1), decimal.mark = ","),
+  caption = "Articles par panier (moyenne)",
+  icon = "fa-list",
+  color = "info"
+)
+```
+
+### Nombre de produits distincts
+```{r}
+valueBox(
+  value = format(total_distinct_products, big.mark = " "),
+  caption = "Produits distincts en catalogue",
+  icon = "fa-boxes",
+  color = "primary"
+)
+```
+
+### Nombre moyen de produits distincts par panier
+```{r}
+valueBox(
+  value = format(round(average_distinct_items_per_basket, 1), decimal.mark = ","),
+  caption = "Produits distincts par panier (moyenne)",
+  icon = "fa-layer-group",
+  color = "warning"
+)
+```
+
+Row {data-height=400}
+-------------------------------------
+
+### Distribution des clients par segment
+```{r}
+plot_ly(rfm_with_clusters, x = ~Segment, type = "histogram", 
+        marker = list(color = segment_colors[levels(rfm_with_clusters$Segment)], opacity = 0.8)) %>%
+  layout(title = "Répartition des clients par segment",
+         xaxis = list(title = "Segment"),
+         yaxis = list(title = "Nombre de clients"))
+```
+
+### Profil RFM moyen par segment
+```{r}
+summary_for_radar <- cluster_summary %>%
+  select(Segment, Recency_Moyenne, Frequency_Moyenne, Monetary_Moyenne) %>%
+  mutate(
+    Recency_Normalized = 1 - (Recency_Moyenne / max(Recency_Moyenne)), # Inverser car une récence plus faible est meilleure
+    Frequency_Normalized = Frequency_Moyenne / max(Frequency_Moyenne),
+    Monetary_Normalized = Monetary_Moyenne / max(Monetary_Moyenne)
+  )
+
+# Préparer les données pour le radar chart avec plotly
+radar_data <- summary_for_radar %>%
+  select(Segment, Recency_Normalized, Frequency_Normalized, Monetary_Normalized) %>%
+  rename(
+    "Récence" = Recency_Normalized,
+    "Fréquence" = Frequency_Normalized,
+    "Montant" = Monetary_Normalized
+  ) %>%
+  pivot_longer(cols = c("Récence", "Fréquence", "Montant"), 
+               names_to = "Métrique", 
+               values_to = "Valeur")
+
+# Créer le radar chart
+plot_ly() %>%
+  add_trace(
+    data = radar_data,
+    r = ~Valeur,
+    theta = ~Métrique,
+    type = "scatterpolar",
+    mode = "lines+markers",
+    fill = "toself",
+    color = ~Segment,
+    colors = segment_colors,
+    line = list(width = 2),
+    marker = list(size = 5)
+  ) %>%
+  layout(
+    polar = list(
+      radialaxis = list(
+        visible = TRUE,
+        range = c(0, 1)
+      )
+    ),
+    title = "Profil RFM par segment (normalisé)",
+    showlegend = TRUE
+  )
+```
+
+Row {data-height=450}
+-------------------------------------
+
+### Tableau des caractéristiques par segment
+```{r}
+datatable(
+  cluster_summary %>%
+    select(Segment, Nombre_Clients, Recency_Moyenne, Frequency_Moyenne, Monetary_Moyenne) %>%
+    rename(
+      "Segment" = Segment,
+      "Nombre de clients" = Nombre_Clients,
+      "Récence moyenne (jours)" = Recency_Moyenne,
+      "Fréquence moyenne (achats)" = Frequency_Moyenne,
+      "Montant moyen (€)" = Monetary_Moyenne
+    ),
+  options = list(
+    pageLength = 4,
+    dom = 't',
+    columnDefs = list(
+      list(className = 'dt-center', targets = 0:4)
+    )
+  ),
+  rownames = FALSE
+) %>%
+  formatCurrency("Montant moyen (€)", currency = "€", digits = 2) %>%
+  formatRound("Récence moyenne (jours)", digits = 1) %>%
+  formatRound("Fréquence moyenne (achats)", digits = 1)
+```
+
+Analyse des Ventes {.tabset .tabset-fade data-icon="fa-chart-line"}
+=====================================
+
+Row
+-------------------------------------
+
+### Top 10 des pays avec les ventes les plus élevées
+```{r}
+plot_ly(top_countries, x = ~reorder(Country, TotalSales), y = ~TotalSales, type = "bar",
+        marker = list(color = "#4682B4", opacity = 0.8)) %>%
+  layout(title = "Top 10 des pays par chiffre d'affaires",
+         xaxis = list(title = "Pays", tickangle = 45),
+         yaxis = list(title = "Chiffre d'affaires (€)", tickformat = ",.0f"))
+```
+
+### Quel article a été acheté le plus souvent ?
+```{r}
+plot_ly(top_items_frequency, x = ~PurchaseCount, y = ~reorder(substr(Description, 1, 30), PurchaseCount), 
+        type = "bar", orientation = "h",
+        marker = list(color = "#4682B4", opacity = 0.8)) %>%
+  layout(title = "Articles les plus fréquemment achetés",
+         xaxis = list(title = "Nombre de transactions"),
+         yaxis = list(title = ""))
+```
+
+Row
+-------------------------------------
+
+### Top 20 des articles les plus vendus (en termes de quantité)
+```{r}
+plot_ly(top_items_quantity, x = ~TotalQuantity, y = ~reorder(substr(Description, 1, 25), TotalQuantity),
+        type = "bar", orientation = "h",
+        marker = list(color = "#4682B4", opacity = 0.8)) %>%
+  layout(title = "Top 20 des articles les plus vendus (quantité)",
+         xaxis = list(title = "Quantité totale vendue"),
+         yaxis = list(title = ""))
+```
+
+Row
+-------------------------------------
+
+### Quel mois a connu les meilleures ventes ?
+```{r}
+plot_ly(sales_by_month, x = ~Month, y = ~TotalSales, color = ~Year, type = "bar",
+        colors = c("#009E73", "#E69F00")) %>%
+  layout(title = "Chiffre d'affaires mensuel",
+         barmode = "group",
+         xaxis = list(title = "Mois"),
+         yaxis = list(title = "Chiffre d'affaires (€)", tickformat = ",.0f"))
+```
+
+Row
+-------------------------------------
+
+### Meilleur produit vendu pour chaque pays (Top 10)
+```{r}
+top_country_products <- best_product_by_country %>% head(10)
+
+plot_ly(top_country_products, x = ~reorder(Country, TotalSales), y = ~TotalSales, type = "bar",
+        text = ~substr(Description, 1, 30),
+        marker = list(color = "#4682B4", opacity = 0.8)) %>%
+  layout(title = "Meilleur produit par pays (Top 10)",
+         xaxis = list(title = "Pays", tickangle = 45),
+         yaxis = list(title = "Chiffre d'affaires (€)", tickformat = ",.0f"))
+```
+
+### Évolution des ventes au cours du temps
+```{r}
+plot_ly(sales_over_time, x = ~InvoiceDate, y = ~TotalSales, type = "scatter", mode = "lines",
+        line = list(color = "#009E73", width = 2)) %>%
+  layout(title = "Évolution quotidienne du chiffre d'affaires",
+         xaxis = list(title = "Date", rangeslider = list(visible = TRUE)),
+         yaxis = list(title = "Chiffre d'affaires (€)", tickformat = ",.0f"))
+```
+
+Visualisations détaillées {.tabset .tabset-fade data-icon="fa-search-plus"}
+=====================================
+
+Row {data-height=600}
+-------------------------------------
+
+### Visualisation 3D des segments
+```{r}
+plot_ly(rfm_with_clusters, 
+        x = ~RecencyNorm, 
+        y = ~FrequencyNorm, 
+        z = ~MonetaryNorm, 
+        color = ~Segment,
+        colors = segment_colors,
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 3, opacity = 0.7)) %>%
+  layout(
+    title = "Visualisation 3D des segments clients",
+    scene = list(
+      xaxis = list(title = "Récence (normalisée)"),
+      yaxis = list(title = "Fréquence (normalisée)"),
+      zaxis = list(title = "Montant (normalisé)")
+    )
+  )
+```
+
+Row {data-height=400}
+-------------------------------------
+
+### Fréquence d'achat vs Montant dépensé
+```{r}
+plot_ly(rfm_with_clusters, 
+        x = ~Frequency, 
+        y = ~Monetary, 
+        color = ~Segment,
+        colors = segment_colors,
+        type = "scatter", 
+        mode = "markers",
+        marker = list(opacity = 0.6, size = 8)) %>%
+  layout(
+    title = "Segments clients: Fréquence vs Montant",
+    xaxis = list(title = "Fréquence d'achat (nombre de transactions)"),
+    yaxis = list(title = "Montant total dépensé (€)", tickformat = ",.0f")
+  )
+```
+
+### Récence vs Montant dépensé
+```{r}
+plot_ly(rfm_with_clusters, 
+        x = ~Recency, 
+        y = ~Monetary, 
+        color = ~Segment,
+        colors = segment_colors,
+        type = "scatter", 
+        mode = "markers",
+        marker = list(opacity = 0.6, size = 8)) %>%
+  layout(
+    title = "Segments clients: Récence vs Montant",
+    xaxis = list(title = "Récence (jours depuis dernier achat)"),
+    yaxis = list(title = "Montant total dépensé (€)", tickformat = ",.0f")
+  )
+```
+
+Analyse des segments {.tabset .tabset-fade data-icon="fa-users"}
+=====================================
+
+Row
+-------------------------------------
+
+### Montant dépensé par segment
+```{r}
+plot_ly(rfm_with_clusters, 
+        y = ~Monetary, 
+        color = ~Segment, 
+        type = "box",
+        colors = segment_colors) %>%
+  layout(
+    title = "Distribution du montant dépensé par segment",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Montant total dépensé (€)", tickformat = ",.0f")
+  )
+```
+
+### Fréquence d'achat par segment
+```{r}
+plot_ly(rfm_with_clusters, 
+        y = ~Frequency, 
+        color = ~Segment, 
+        type = "box",
+        colors = segment_colors) %>%
+  layout(
+    title = "Distribution de la fréquence d'achat par segment",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Nombre de transactions")
+  )
+```
+
+Row
+-------------------------------------
+
+### Récence par segment
+```{r}
+plot_ly(rfm_with_clusters, 
+        y = ~Recency, 
+        color = ~Segment, 
+        type = "box",
+        colors = segment_colors) %>%
+  layout(
+    title = "Distribution de la récence par segment",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Jours depuis le dernier achat")
+  )
+```
+
+### Valeur relative des segments
+```{r}
+# Calculer la valeur totale par segment
+segment_value <- rfm_with_clusters %>%
+  group_by(Segment) %>%
+  summarise(
+    Total_Monetary = sum(Monetary),
+    Count = n(),
+    Percentage = Total_Monetary / sum(rfm_with_clusters$Monetary) * 100
+  ) %>%
+  arrange(desc(Total_Monetary))
+
+# Créer un graphique en anneau pour visualiser la contribution de chaque segment
+plot_ly(segment_value, 
+        labels = ~Segment, 
+        values = ~Total_Monetary, 
+        type = "pie",
+        hole = 0.4,
+        textposition = "inside",
+        textinfo = "label+percent",
+        insidetextfont = list(color = "#FFFFFF"),
+        marker = list(colors = segment_colors,
+                      line = list(color = "#FFFFFF", width = 1))) %>%
+  layout(
+    title = "Contribution au chiffre d'affaires par segment",
+    showlegend = TRUE
+  )
+```
+
+Recommandations stratégiques {.tabset .tabset-fade data-icon="fa-lightbulb"}
+=====================================
+
+Row {data-height=300}
+-------------------------------------
+
+### Stratégies pour les segments clients {data-width=1200}
+
+```{r}
+strategy_df <- data.frame(
+  Segment = c("Clients Occasionnels", "Clients Réguliers","Clients Premium", "Clients Inactifs"),
+  Description = c(
+    "Clients avec une fréquence d'achat modérée et un montant moyen.",
+    "Clients fidèles avec une fréquence d'achat élevée et un montant moyen.",
+    "Clients à haute valeur qui dépensent beaucoup et achètent fréquemment.",
+    "Clients avec une faible activité récente, basse fréquence et faible montant."
+  ),
+  Stratégie = c(
+    "Promotions ciblées pour augmenter la fréquence, suggestions personnalisées basées sur les achats précédents",
+    "Incitations à augmenter le panier moyen, ventes croisées et montantes, programme de recommandation avec avantages.",
+    "Programme de fidélité VIP, offres exclusives en avant-première, service client personnalisé, invitations à des événements spéciaux.",
+    "Campagnes de réactivation avec offres spéciales, enquêtes de satisfaction, remises sur le premier achat après retour."
+  )
+)
+
+datatable(
+  strategy_df,
+  options = list(
+    pageLength = 4,
+    dom = 't',
+    columnDefs = list(
+      list(width = "15%", targets = 0),
+      list(width = "35%", targets = 1),
+      list(width = "50%", targets = 2)
+    )
+  ),
+  rownames = FALSE,
+  caption = htmltools::tags$caption(
+    style = "caption-side: top; text-align: center; font-size: 18px; margin-bottom: 10px;",
+    "Recommandations stratégiques par segment client"
+  )
+)
+```
+
+Row {data-height=700}
+-------------------------------------
+
+### KPIs à suivre par segment {data-width=1200}
+
+```{r}
+# Créer un contenu HTML avec les KPIs par segment
+htmltools::HTML('
+<div style="padding: 15px;">
+  <div class="row">
+    <div class="col-md-6">
+      <div class="well" style="background-color: #4477AA; color: white; border-radius: 5px; padding: 15px; height: 280px;">
+        <h3>Clients Premium</h3>
+        <p><strong>KPIs principaux :</strong></p>
+        <ul>
+          <li>Taux de rétention</li>
+          <li>Valeur vie client (LTV)</li>
+          <li>Taux d\'adoption des offres exclusives</li>
+          <li>Net Promoter Score (NPS)</li>
+          <li>Fréquence des achats à haute valeur</li>
+        </ul>
+        <p><strong>Objectifs :</strong> Maximiser la rétention et augmenter la valeur vie client de 15%</p>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="well" style="background-color: #66CCEE; color: white; border-radius: 5px; padding: 15px; height: 280px;">
+        <h3>Clients Réguliers</h3>
+        <p><strong>KPIs principaux :</strong></p>
+        <ul>
+          <li>Valeur moyenne du panier</li>
+          <li>Taux de conversion des ventes croisées</li>
+          <li>Taux de participation au programme de fidélité</li>
+          <li>Nombre de recommandations générées</li>
+          <li>Engagement sur les canaux de communication</li>
+        </ul>
+        <p><strong>Objectifs :</strong> Augmenter la valeur du panier moyen de 10% et le taux de conversion des ventes croisées de 15%</p>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="margin-top: 15px;">
+    <div class="col-md-6">
+      <div class="well" style="background-color: #CCBB44; color: white; border-radius: 5px; padding: 15px; height: 280px;">
+        <h3>Clients Occasionnels</h3>
+        <p><strong>KPIs principaux :</strong></p>
+        <ul>
+          <li>Fréquence d\'achat</li>
+          <li>Taux de conversion des promotions</li>
+          <li>Taux d\'ouverture des emails</li>
+          <li>Engagement sur les réseaux sociaux</li>
+          <li>Taux de migration vers le segment "Réguliers"</li>
+        </ul>
+        <p><strong>Objectifs :</strong> Augmenter la fréquence d\'achat de 25% et améliorer le taux de migration vers le segment supérieur de 10%</p>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="well" style="background-color: #EE6677; color: white; border-radius: 5px; padding: 15px; height: 280px;">
+        <h3>Clients Inactifs</h3>
+        <p><strong>KPIs principaux :</strong></p>
+        <ul>
+          <li>Taux de réactivation</li>
+          <li>Taux de réponse aux campagnes de reconquête</li>
+          <li>Taux de clic sur les offres spéciales</li>
+          <li>Taux de conversion des offres de retour</li>
+          <li>Taux de participation aux enquêtes</li>
+        </ul>
+        <p><strong>Objectifs :</strong> Obtenir un taux de réactivation de 5% et un taux de réponse aux campagnes de 12%</p>
+      </div>
+    </div>
+  </div>
+</div>
+')
+```
